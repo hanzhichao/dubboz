@@ -22,7 +22,8 @@ class Dubbo(telnetlib.Telnet):
         self.command(Dubbo.prompt, command_str)
         s = datetime.datetime.now()
         data = self.command(Dubbo.prompt, "")
-        data = json.loads(data.decode(Dubbo.coding, errors='ignore').split('\n')[0].strip())
+        data = data.decode(Dubbo.coding, errors='ignore').split('\n')[0].strip()
+        # data = json.loads(data.decode(Dubbo.coding, errors='ignore').split('\n')[0].strip())
         e = datetime.datetime.now()
         print(e - s)
         return data
