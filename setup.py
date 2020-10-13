@@ -34,7 +34,7 @@ setup(
     packages=find_packages(include=['dubboz']),
     setup_requires=setup_requirements,
     url='https://github.com/hanzhichao/dubboz',
-    version='0.11',
+    version='0.12',
     zip_safe=True,
-    install_requires=[]
+    install_requires=['kazoo']
 )
