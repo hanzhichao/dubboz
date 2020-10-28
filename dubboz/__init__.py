@@ -2,7 +2,6 @@ import telnetlib
 import json
 import socket
 import datetime
-import re
 from urllib.parse import unquote, urlparse
 import random
 
@@ -103,7 +102,7 @@ class Dubbo(telnetlib.Telnet):
     def invoke(self, service, method, args_str) -> str:
         cmd = f"invoke {service}.{method}({args_str})"
         result = self.command(cmd)
-        # print(cmd, '->', result)
+        print(cmd, '->', result)
         return result
 
     def request(self, service, method, *args)->Response:
