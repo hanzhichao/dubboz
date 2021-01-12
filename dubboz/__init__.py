@@ -1,10 +1,9 @@
 import telnetlib
 import json
+import re
 import socket
-import datetime
 from urllib.parse import unquote, urlparse
 import random
-
 from kazoo.client import KazooClient
 
 DEFAULT_TIMEOUT = socket._GLOBAL_DEFAULT_TIMEOUT
@@ -29,15 +28,6 @@ def _to_str(arg):
     return str(value)
 
 
-class Response(object):
-    def __init__(self, text, elapsed=None):
-        self.text = text
-        self.elapsed = elapsed
-
-    def json(self):
-        return json.loads(self.text)
-
-
 class Zookeeper(KazooClient):
     def get_services(self):
         result = self.get_children(f'/dubbo')
@@ -53,13 +43,13 @@ class Zookeeper(KazooClient):
 
 
 class Dubbo(telnetlib.Telnet):
+    """Dubbo Client"""
     prompt = 'dubbo>'
     coding = 'utf-8'
 
-    def __init__(self, host=None, port=None, zk_hosts=None, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, host=None, port=None, timeout=DEFAULT_TIMEOUT):
         self.host = host
         self.port = port
-        self.zk_hosts = zk_hosts
         self.timeout = timeout
 
         super().__init__(host, port, timeout=timeout)
@@ -74,13 +64,13 @@ class Dubbo(telnetlib.Telnet):
     def command(self, cmd: str) -> str:
         self._command(Dubbo.prompt, cmd)
         result = self._command(Dubbo.prompt, "")
-        result = result.decode(Dubbo.coding, errors='ignore').split('\n')[0].strip()
+        result = result.decode(Dubbo.coding, errors='ignore').rstrip(self.prompt).strip()
         return result
 
     def ls(self, service=None):
         cmd = "ls" if service is None else f"ls {service}"
-        data = self.command(cmd)
-        data = data.split('\n')
+        cmd_result = self.command(cmd)
+        data = [item.strip() for item in cmd_result.split('\n') if item.strip()]
         return data
 
     def get_services(self):
@@ -89,49 +79,75 @@ class Dubbo(telnetlib.Telnet):
     def get_methods(self, service):
         return self.ls(service)
 
-    def get_providers(self, service: str):
-        if self.zk_hosts is None:
-            raise ValueError('No zk_hosts set')
-
-        zk = Zookeeper(hosts=self.zk_hosts)
-        zk.start()
-        providers = zk.get_providers(service)
-        zk.stop()
-        return providers
-
-    def invoke(self, service, method, args_str) -> str:
+    def invoke(self, service, method, *args) -> str:
+        args_str = ','.join([_to_str(arg) for arg in args])
         cmd = f"invoke {service}.{method}({args_str})"
-        result = self.command(cmd)
-        print(cmd, '->', result)
-        return result
+        cmd_result = self.command(cmd)
+        data = [item.strip() for item in cmd_result.split('\n') if item.strip()]
+        if len(data) < 2:
+            raise ValueError('无该方法，方法或参数签名不正确')
+        result, elapsed_line = cmd_result.split('\n')
+        elapsed = int(re.search(r'\d+', elapsed_line).group())
+        result = result.strip().strip('"')
+        return result, elapsed
 
-    def request(self, service, method, *args)->Response:
-        args_str = ','.join([_to_str(arg) for arg in args])
 
-        if not self.host:
-            providers = self.get_providers(service)
-            if not providers:
-                raise ValueError('Get no providers from zk')
-            self.host, self.port = random.choice(providers)
-            self.open(self.host, self.port, self.timeout)
+class Service(object):
+    def __init__(self, registry: str, name: str):
+        """
+        Dubbo Service
+        :param registry: dubbo://127.0.0.1:20880 or zookeeper://192.168.1.9:2181
+        :param name: Service name
+        """
+        self.name = name
+        self.registry = registry
+        self.provider = None
+        self.providers = []
+        self.zk_cli = None  # zk client
+        self.dubbo_cli = None
+        self.methods = []
 
-        start_at = datetime.datetime.now()
-        data = self.invoke(service, method, args_str)
-        elapsed = datetime.datetime.now() - start_at
-        res = Response(data, elapsed=elapsed)
-        return res
+        self._get_provider()
+        self._get_methods()
 
-    def request_all(self, service, method, *args)->list:
-        args_str = ','.join([_to_str(arg) for arg in args])
-        providers = self.get_providers(service)
-        if not providers:
-            raise ValueError('Get no providers from zk')
-        res_list = []
-        for host, port in providers:
-            self.open(host, port, self.timeout)
-            start_at = datetime.datetime.now()
-            data = self.invoke(service, method, args_str)
-            elapsed = datetime.datetime.now() - start_at
-            res = Response(data, elapsed=elapsed)
-            res_list.append(res)
-        return res_list
+    def _get_provider(self):
+        # 1. 获取registry类型
+        self.registry_type = self.registry.split('://')[0] if isinstance(self.registry, str) else None
+        # 2. 获取provider和providers
+        if self.registry_type == 'dubbo':
+            self.provider = self.registry
+            self.providers = [self.provider]
+        elif self.registry_type == 'zookeeper':
+            self.zk_cli = Zookeeper(hosts=self.registry)
+            self.providers = self.zk_cli.get_providers(self.name)
+            self.provider = random.choice(self.providers)
+        else:
+            raise NotImplemented('目前仅支持dubbo和zookeeper')
+
+    def _get_methods(self):
+        self.dubbo_cli = self._get_dubbo_cli(self.provider)
+        if self.dubbo_cli is None:
+            raise ValueError('未提供provider')
+        self.methods = self.dubbo_cli.get_methods(self.name)
+
+    @staticmethod
+    def _get_dubbo_cli(provider):
+        host, port = provider.lstrip('dubbo://').split(':')
+        dubbo_cli = Dubbo(host=host, port=port)
+        return dubbo_cli
+
+    def call(self, method, *args, index=None):
+        if index is None:
+            dubbo_cli = self.dubbo_cli
+        else:
+            provider = self.providers[index]
+            dubbo_cli = self._get_dubbo_cli(provider)
+        return dubbo_cli.invoke(self.name, method, *args)
+
+    def call_all(self, method, *args):
+        results = [self.call(method, *args, index=index) for index, _ in enumerate(self.providers)]
+        return results
+
+    def __getattr__(self, item):
+        return lambda *args: self.call(item, *args)
+
