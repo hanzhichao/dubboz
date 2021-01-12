@@ -149,5 +149,5 @@ class Service(object):
         return results
 
     def __getattr__(self, item):
-        return lambda *args: self.call(item, *args)
+        return lambda *args: self.call(item, *args)[0]
 
